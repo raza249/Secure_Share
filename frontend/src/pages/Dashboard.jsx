@@ -915,6 +915,9 @@ function Dashboard() {
           </button>
         ))}
       </nav>
+      <button className="mob-signout" onClick={logout}>
+        🚪 Sign Out
+      </button>
     </div>
   );
 }
