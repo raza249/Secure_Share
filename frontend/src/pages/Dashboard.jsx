@@ -900,6 +900,21 @@ function Dashboard() {
       )}
 
       <ToastContainer toasts={toasts} />
+       <nav className="mobile-bottom-nav">
+        {navItems.map(nav => (
+          <button
+            key={nav.id}
+            className={`mob-nav-item ${activeTab === nav.id ? "active" : ""}`}
+            onClick={() => setActiveTab(nav.id)}
+          >
+            <span className="mob-icon">{nav.icon}</span>
+            <span>{nav.label}</span>
+            {nav.count !== undefined && nav.count > 0 && (
+              <span className="mob-badge">{nav.count}</span>
+            )}
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }
