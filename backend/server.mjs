@@ -11,8 +11,6 @@ import authRoutes from "./src/routes/authRoutes.mjs";
 import fileRoutes from "./src/routes/fileRoutes.mjs";
 import userRoutes from "./src/routes/userRoutes.mjs";
 
-
-
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -22,28 +20,33 @@ const app = express();
 const server = http.createServer(app);
 
 const PORT = process.env.PORT || 5000;
+const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+
 
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
+    origin: CLIENT_URL,
     methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true,
   },
 });
 
+
 app.use(
   cors({
-    origin: ["http://localhost:5173", "http://localhost:5174"],
+    origin: CLIENT_URL,
     credentials: true,
   })
 );
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use("/api/users", userRoutes);
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
+app.use("/api/users", userRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/files", fileRoutes);
+
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 app.get("/", (req, res) => {
   res.json({
@@ -51,9 +54,11 @@ app.get("/", (req, res) => {
     message: "Hello I'm Prem",
   });
 });
+
 app.get("/test", (req, res) => {
   res.json({ ok: true });
 });
+
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
@@ -72,10 +77,7 @@ export { io };
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => {
-    console.log(
-      "Connected to database:",
-      mongoose.connection.name
-    );
+    console.log("Connected to database:", mongoose.connection.name);
 
     server.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
