@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { io } from "socket.io-client";
 import API from "../api";
 
-const socket = io("http://localhost:5000", {
+const socket = io( import.meta.env.VITE_SOCKET_URL ||  "http://localhost:5000", {
   auth: { token: localStorage.getItem("token") },
 });
 
