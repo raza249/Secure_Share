@@ -2,9 +2,36 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { io } from "socket.io-client";
 import API from "../api";
 
-const socket = io( import.meta.env.VITE_SOCKET_URL ||  "http://localhost:5000", {
+// ─── Base URL (no hardcoded localhost) ────────────────────────
+const BASE_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
+
+const socket = io(BASE_URL, {
   auth: { token: localStorage.getItem("token") },
+  transports: ["websocket", "polling"],
 });
+
+// ─── Allowed file types (expanded — code files included) ─────
+const ALLOWED_EXTENSIONS = [
+  // documents
+  "pdf","doc","docx","xls","xlsx","ppt","pptx","txt","rtf","odt","csv",
+  // images
+  "jpg","jpeg","png","gif","bmp","webp","svg","ico","tiff",
+  // video
+  "mp4","mkv","mov","avi","wmv","webm","flv",
+  // audio
+  "mp3","wav","ogg","flac","aac","m4a",
+  // code
+  "py","java","js","jsx","ts","tsx","html","htm","css","scss","sass",
+  "c","cpp","h","cs","go","rb","php","swift","kt","rs","sh","bash",
+  "json","xml","yaml","yml","toml","ini","env","md","sql","r","m",
+  "vue","svelte","dart","lua","pl","scala","hs","ex","exs","clj",
+  // archives
+  "zip","rar","tar","gz","7z","bz2",
+  // misc
+  "log","config","lock","gitignore","dockerfile","makefile",
+];
+
+const MAX_SIZE_MB = 50;
 
 // ─── Helpers ──────────────────────────────────────────────────
 function formatBytes(bytes) {
@@ -29,25 +56,58 @@ function timeAgo(str) {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function getFileIcon(mimetype = "") {
-  if (mimetype.startsWith("image/")) return { icon: "🖼️", cls: "type-image" };
-  if (mimetype === "application/pdf") return { icon: "📄", cls: "type-pdf" };
-  if (mimetype.startsWith("video/")) return { icon: "🎬", cls: "type-video" };
-  if (mimetype.startsWith("audio/")) return { icon: "🎵", cls: "type-doc" };
-  if (mimetype.includes("word") || mimetype.includes("document")) return { icon: "📝", cls: "type-doc" };
-  if (mimetype.includes("zip") || mimetype.includes("rar")) return { icon: "🗜️", cls: "type-zip" };
-  if (mimetype.startsWith("text/")) return { icon: "📃", cls: "type-doc" };
+function getExt(name = "") {
+  return name.split(".").pop().toLowerCase();
+}
+
+// Extended file type detection — handles code files, unknown mimes
+function getFileIcon(file) {
+  const mime = file.mimetype || "";
+  const ext  = getExt(file.originalname);
+
+  if (mime.startsWith("image/"))  return { icon: "🖼️", cls: "type-image" };
+  if (mime === "application/pdf") return { icon: "📄", cls: "type-pdf" };
+  if (mime.startsWith("video/"))  return { icon: "🎬", cls: "type-video" };
+  if (mime.startsWith("audio/"))  return { icon: "🎵", cls: "type-doc" };
+  if (mime.includes("word") || mime.includes("document")) return { icon: "📝", cls: "type-doc" };
+  if (mime.includes("zip") || mime.includes("rar") || mime.includes("tar"))
+    return { icon: "🗜️", cls: "type-zip" };
+  if (mime.startsWith("text/"))   return { icon: "📃", cls: "type-doc" };
+
+  // Code file detection by extension when mime is octet-stream / unknown
+  const codeExts = ["py","java","js","jsx","ts","tsx","html","htm","css","scss",
+    "c","cpp","h","cs","go","rb","php","swift","kt","rs","sh","bash",
+    "sql","r","m","vue","svelte","dart","lua","pl","scala","hs","ex","exs","clj"];
+  if (codeExts.includes(ext)) return { icon: "💻", cls: "type-doc" };
+
+  const docExts = ["json","xml","yaml","yml","toml","ini","md","env","log","config","gitignore","makefile","dockerfile"];
+  if (docExts.includes(ext)) return { icon: "📋", cls: "type-doc" };
+
   return { icon: "📁", cls: "type-other" };
 }
 
-function canPreview(mimetype = "") {
-  return (
-    mimetype.startsWith("image/") ||
-    mimetype === "application/pdf" ||
-    mimetype.startsWith("text/") ||
-    mimetype.startsWith("video/") ||
-    mimetype.startsWith("audio/")
-  );
+// Determine if we can show a preview in the browser
+function canPreview(file) {
+  const mime = file.mimetype || "";
+  const ext  = getExt(file.originalname);
+
+  if (mime.startsWith("image/")) return "image";
+  if (mime === "application/pdf") return "pdf";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+
+  // text/* covers text/plain, text/html, text/css etc.
+  if (mime.startsWith("text/")) return "text";
+
+  // octet-stream code/text files — detect by extension
+  const textExts = ["py","java","js","jsx","ts","tsx","html","htm","css","scss","sass",
+    "c","cpp","h","cs","go","rb","php","swift","kt","rs","sh","bash",
+    "json","xml","yaml","yml","toml","ini","md","sql","r","log","config",
+    "gitignore","env","makefile","dockerfile","txt","rtf","csv","vue",
+    "svelte","dart","lua","pl","scala","hs","ex","exs","clj","lock"];
+  if (textExts.includes(ext)) return "text";
+
+  return null; // not previewable
 }
 
 const storedUser = JSON.parse(localStorage.getItem("user") || "{}");
@@ -80,23 +140,47 @@ function ToastContainer({ toasts }) {
 
 // ─── Preview Modal ────────────────────────────────────────────
 function PreviewModal({ file, onClose }) {
-  const previewUrl = `http://localhost:5000/api/files/preview/${file._id}`;
-  const token = localStorage.getItem("token");
-  const [blobUrl, setBlobUrl] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const token      = localStorage.getItem("token");
+  const previewUrl = `${BASE_URL}/api/files/preview/${file._id}`;
+  const [blobUrl,  setBlobUrl]  = useState(null);
+  const [content,  setContent]  = useState("");   // for text files
+  const [loading,  setLoading]  = useState(true);
+  const [error,    setError]    = useState("");
+  const blobRef = useRef(null);
+
+  const pType = canPreview(file);
 
   useEffect(() => {
-    // Fetch with auth token and create blob URL
+    if (!pType) { setLoading(false); return; }
+
     fetch(previewUrl, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.blob())
-      .then(blob => {
-        setBlobUrl(URL.createObjectURL(blob));
+      .then(async res => {
+        if (!res.ok) throw new Error(`Server returned ${res.status}`);
+        const blob = await res.blob();
+
+        if (pType === "text") {
+          // Read text files as string so we can display with syntax highlighting
+          const text = await blob.text();
+          setContent(text);
+        } else {
+          const url = URL.createObjectURL(blob);
+          blobRef.current = url;
+          setBlobUrl(url);
+        }
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(err => {
+        setError(err.message);
+        setLoading(false);
+      });
 
-    return () => { if (blobUrl) URL.revokeObjectURL(blobUrl); };
-  }, [blobUrl, file._id, previewUrl, token]);
+    return () => {
+      if (blobRef.current) URL.revokeObjectURL(blobRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file._id]);
+
+  const ext = getExt(file.originalname);
 
   const renderContent = () => {
     if (loading) return (
@@ -105,27 +189,69 @@ function PreviewModal({ file, onClose }) {
         <p>Loading preview…</p>
       </div>
     );
-    if (!blobUrl) return <p style={{ color: "#f87171", textAlign: "center", padding: 40 }}>Preview failed to load.</p>;
+    if (error) return (
+      <div style={{ textAlign: "center", padding: "40px 0" }}>
+        <div style={{ fontSize: 36, marginBottom: 12 }}>⚠️</div>
+        <p style={{ color: "#fb7185" }}>Preview failed: {error}</p>
+        <p style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
+          Try downloading the file instead.
+        </p>
+      </div>
+    );
 
-    const mime = file.mimetype || "";
-    if (mime.startsWith("image/"))
-      return <img src={blobUrl} alt={file.originalname} style={{ maxWidth: "100%", maxHeight: "65vh", objectFit: "contain", borderRadius: 12 }} />;
-    if (mime === "application/pdf")
-      return <iframe src={blobUrl} style={{ width: "100%", height: "65vh", border: "none", borderRadius: 12 }} title="PDF Preview" />;
-    if (mime.startsWith("video/"))
-      return <video src={blobUrl} controls style={{ width: "100%", maxHeight: "65vh", borderRadius: 12 }} />;
-    if (mime.startsWith("audio/"))
+    if (pType === "image")
+      return <img src={blobUrl} alt={file.originalname}
+        style={{ maxWidth: "100%", maxHeight: "65vh", objectFit: "contain", borderRadius: 12 }} />;
+
+    if (pType === "pdf")
+      return <iframe src={blobUrl} style={{ width: "100%", height: "65vh", border: "none", borderRadius: 12 }}
+        title="PDF Preview" />;
+
+    if (pType === "video")
+      return <video src={blobUrl} controls
+        style={{ width: "100%", maxHeight: "65vh", borderRadius: 12 }} />;
+
+    if (pType === "audio")
       return <audio src={blobUrl} controls style={{ width: "100%", marginTop: 20 }} />;
-    if (mime.startsWith("text/"))
+
+    if (pType === "text")
       return (
-        <iframe src={blobUrl} style={{ width: "100%", height: "55vh", border: "none", borderRadius: 12, background: "#0a0f2e" }} title="Text Preview" />
+        <div style={{
+          background: "#0c0f0a", borderRadius: 10, padding: "16px 20px",
+          maxHeight: "65vh", overflowY: "auto", textAlign: "left",
+        }}>
+          <div style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            marginBottom: 12, paddingBottom: 10,
+            borderBottom: "1px solid rgba(255,255,255,0.08)",
+          }}>
+            <span style={{ fontSize: 12, color: "#64748b", fontFamily: "monospace" }}>
+              .{ext} — {formatBytes(file.size)} — {content.split("\n").length} lines
+            </span>
+            <button className="btn btn-ghost btn-sm"
+              onClick={() => navigator.clipboard.writeText(content)}>
+              📋 Copy
+            </button>
+          </div>
+          <pre style={{
+            fontFamily: "'Fira Code', 'Consolas', monospace",
+            fontSize: 13, lineHeight: 1.65,
+            color: "#e2e8f0", whiteSpace: "pre-wrap", wordBreak: "break-word",
+            margin: 0,
+          }}>
+            {content}
+          </pre>
+        </div>
       );
-    return <p style={{ color: "#94a3b8", textAlign: "center", padding: 40 }}>Preview not available for this file type.</p>;
+
+    return <p style={{ color: "#94a3b8", textAlign: "center", padding: 40 }}>
+      Preview not available for this file type.
+    </p>;
   };
 
   return (
     <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal" style={{ maxWidth: 800, width: "95vw" }}>
+      <div className="modal" style={{ maxWidth: 860, width: "95vw" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
           <div>
             <h3 style={{ margin: 0 }}>👁️ Preview</h3>
@@ -133,7 +259,12 @@ function PreviewModal({ file, onClose }) {
           </div>
           <button className="btn btn-ghost btn-sm" onClick={onClose}>✕ Close</button>
         </div>
-        <div style={{ background: "rgba(0,0,0,0.3)", borderRadius: 12, padding: 16, minHeight: 200, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{
+          background: "rgba(0,0,0,0.4)", borderRadius: 12,
+          padding: pType === "text" ? 0 : 16,
+          minHeight: 200, display: "flex", alignItems: "center", justifyContent: "center",
+          overflow: "hidden",
+        }}>
           {renderContent()}
         </div>
         <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "flex-end" }}>
@@ -146,9 +277,14 @@ function PreviewModal({ file, onClose }) {
 
 // ─── Share Modal ──────────────────────────────────────────────
 function ShareModal({ file, users, onClose, onShare, onPublicLink }) {
-  const [receiver, setReceiver] = useState("");
+  const [receiver,      setReceiver]      = useState("");
   const [publicLoading, setPublicLoading] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copied,        setCopied]        = useState(false);
+
+  // Build the public URL — uses the current origin so it works on any deployment
+  const publicUrl = file.publicToken
+    ? `${window.location.origin}/public/${file.publicToken}`
+    : null;
 
   const handlePublicLink = async () => {
     setPublicLoading(true);
@@ -157,30 +293,41 @@ function ShareModal({ file, users, onClose, onShare, onPublicLink }) {
   };
 
   const copyLink = () => {
-    const url = `${window.location.origin}/public/${file.publicToken}`;
-    navigator.clipboard.writeText(url);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (!publicUrl) return;
+    navigator.clipboard.writeText(publicUrl).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
   };
 
   return (
     <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
       <div className="modal">
         <h3>📤 Share File</h3>
-        <p style={{ marginBottom: 20 }}>Sharing: <strong style={{ color: "#fff" }}>{file.originalname}</strong></p>
+        <p style={{ marginBottom: 20 }}>
+          Sharing: <strong style={{ color: "#fff" }}>{file.originalname}</strong>
+        </p>
 
         {/* User-to-user share */}
         <div style={{ marginBottom: 20 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#64748b", marginBottom: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase",
+            letterSpacing: 1, color: "#64748b", marginBottom: 8 }}>
             Share with a User
           </div>
-          <select className="modal-select" value={receiver} onChange={e => setReceiver(e.target.value)}>
-            <option value="">Select a user...</option>
+          <select className="modal-select" value={receiver}
+            onChange={e => setReceiver(e.target.value)}>
+            <option value="">Select a user…</option>
             {users.map(u => (
-              <option key={u._id} value={u.email}>{u.username} ({u.email})</option>
+              <option key={u._id} value={u.email}>
+                {u.username} ({u.email})
+              </option>
             ))}
           </select>
-          <button className="btn btn-primary" style={{ width: "100%" }} onClick={() => { onShare(file._id, receiver); onClose(); }}>
+          <button
+            className="btn btn-primary"
+            style={{ width: "100%" }}
+            disabled={!receiver}
+            onClick={() => { onShare(file._id, receiver); onClose(); }}>
             Send to User
           </button>
         </div>
@@ -189,30 +336,38 @@ function ShareModal({ file, users, onClose, onShare, onPublicLink }) {
 
         {/* Public link */}
         <div>
-          <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#64748b", marginBottom: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase",
+            letterSpacing: 1, color: "#64748b", marginBottom: 8 }}>
             🌐 Public Link
           </div>
-          {file.isPublic ? (
+          {file.isPublic && publicUrl ? (
             <div>
               <div style={{
-                padding: "10px 14px", background: "rgba(52,211,153,0.08)",
-                border: "1px solid rgba(52,211,153,0.25)", borderRadius: 10,
-                fontSize: 13, color: "#34d399", marginBottom: 10,
-                wordBreak: "break-all"
+                padding: "10px 14px",
+                background: "rgba(13,148,136,0.1)",
+                border: "1px solid rgba(13,148,136,0.3)",
+                borderRadius: 10,
+                fontSize: 12,
+                color: "#2dd4bf",
+                marginBottom: 10,
+                wordBreak: "break-all",
+                fontFamily: "monospace",
               }}>
-                {window.location.origin}/public/{file.publicToken}
+                {publicUrl}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={copyLink}>
                   {copied ? "✅ Copied!" : "📋 Copy Link"}
                 </button>
-                <button className="btn btn-danger btn-sm" style={{ flex: 1 }} onClick={handlePublicLink} disabled={publicLoading}>
-                  {publicLoading ? "…" : "🚫 Disable Link"}
+                <button className="btn btn-danger btn-sm" style={{ flex: 1 }}
+                  onClick={handlePublicLink} disabled={publicLoading}>
+                  {publicLoading ? "…" : "🚫 Disable"}
                 </button>
               </div>
             </div>
           ) : (
-            <button className="btn btn-ghost" style={{ width: "100%" }} onClick={handlePublicLink} disabled={publicLoading}>
+            <button className="btn btn-ghost" style={{ width: "100%" }}
+              onClick={handlePublicLink} disabled={publicLoading}>
               {publicLoading ? "Generating…" : "🔗 Generate Public Link"}
             </button>
           )}
@@ -226,14 +381,14 @@ function ShareModal({ file, users, onClose, onShare, onPublicLink }) {
   );
 }
 
-// ─── Activity Log Tab ─────────────────────────────────────────
+// ─── Activity Log ─────────────────────────────────────────────
 const ACTION_META = {
-  uploaded:      { icon: "⬆️", label: "Uploaded",       color: "#818cf8" },
-  downloaded:    { icon: "⬇️", label: "Downloaded",     color: "#34d399" },
-  shared:        { icon: "📤", label: "Shared",          color: "#a78bfa" },
-  deleted:       { icon: "🗑️", label: "Deleted",        color: "#f87171" },
-  previewed:     { icon: "👁️", label: "Previewed",      color: "#67e8f9" },
-  public_shared: { icon: "🌐", label: "Public link",     color: "#fbbf24" },
+  uploaded:      { icon: "⬆️", label: "Uploaded",    color: "#fbbf24" },
+  downloaded:    { icon: "⬇️", label: "Downloaded",  color: "#2dd4bf" },
+  shared:        { icon: "📤", label: "Shared",       color: "#a78bfa" },
+  deleted:       { icon: "🗑️", label: "Deleted",     color: "#fb7185" },
+  previewed:     { icon: "👁️", label: "Previewed",   color: "#67e8f9" },
+  public_shared: { icon: "🌐", label: "Public link",  color: "#fbbf24" },
 };
 
 function ActivityLogTab({ logs, loading }) {
@@ -259,9 +414,7 @@ function ActivityLogTab({ logs, loading }) {
             background: "rgba(255,255,255,0.03)",
             border: "1px solid rgba(255,255,255,0.07)",
             borderRadius: 12,
-            transition: "background 0.2s",
           }}>
-            {/* Icon badge */}
             <div style={{
               width: 40, height: 40, borderRadius: 10, flexShrink: 0,
               background: `${meta.color}18`,
@@ -271,28 +424,27 @@ function ActivityLogTab({ logs, loading }) {
             }}>
               {meta.icon}
             </div>
-
-            {/* Info */}
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <span style={{ fontSize: 14, fontWeight: 600, color: "#f1f5f9" }}>
                   {meta.label}
                 </span>
                 <span style={{
-                  fontSize: 11, fontWeight: 700, padding: "2px 8px",
-                  borderRadius: 999, background: `${meta.color}18`,
-                  color: meta.color, border: `1px solid ${meta.color}30`,
+                  fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 999,
+                  background: `${meta.color}18`, color: meta.color,
+                  border: `1px solid ${meta.color}30`,
                 }}>
                   {log.action}
                 </span>
               </div>
-              <div style={{ fontSize: 13, color: "#64748b", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <div style={{
+                fontSize: 13, color: "#64748b", marginTop: 3,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}>
                 {log.fileName || "Unknown file"}
                 {log.targetUser && ` → ${log.targetUser.username}`}
               </div>
             </div>
-
-            {/* Time */}
             <div style={{ fontSize: 12, color: "#475569", flexShrink: 0 }}>
               {timeAgo(log.createdAt)}
             </div>
@@ -305,8 +457,8 @@ function ActivityLogTab({ logs, loading }) {
 
 // ─── File Card ────────────────────────────────────────────────
 function FileCard({ file, onDelete, onShare, onDownload, onPreview, isShared }) {
-  const { icon, cls } = getFileIcon(file.mimetype);
-  const previewable = canPreview(file.mimetype);
+  const { icon, cls } = getFileIcon(file);
+  const pType = canPreview(file);
 
   return (
     <div className="file-card">
@@ -320,20 +472,28 @@ function FileCard({ file, onDelete, onShare, onDownload, onPreview, isShared }) 
         {file.isPublic && <span style={{ color: "#fbbf24" }}>🌐 Public</span>}
       </div>
       <div className="file-actions">
-        {previewable && (
+        {pType && (
           <button className="btn btn-ghost btn-sm" onClick={() => onPreview(file)}>
             👁️ Preview
           </button>
         )}
-        <button className="btn btn-ghost btn-sm" onClick={() => onDownload(file._id, file.originalname)}>
+        <button className="btn btn-ghost btn-sm"
+          onClick={() => onDownload(file._id, file.originalname)}>
           ⬇️ Download
         </button>
         {!isShared && (
           <>
-            <button className="btn btn-sm" style={{ background: "rgba(139,92,246,0.15)", border: "1px solid rgba(139,92,246,0.3)", color: "#a78bfa" }} onClick={() => onShare(file)}>
+            <button className="btn btn-sm"
+              style={{
+                background: "rgba(13,148,136,0.15)",
+                border: "1px solid rgba(13,148,136,0.3)",
+                color: "#2dd4bf",
+              }}
+              onClick={() => onShare(file)}>
               📤 Share
             </button>
-            <button className="btn btn-danger btn-sm" onClick={() => onDelete(file._id)}>🗑️</button>
+            <button className="btn btn-danger btn-sm"
+              onClick={() => onDelete(file._id)}>🗑️</button>
           </>
         )}
       </div>
@@ -341,78 +501,190 @@ function FileCard({ file, onDelete, onShare, onDownload, onPreview, isShared }) 
   );
 }
 
+// ─── Upload Tab ────────────────────────────────────────────────
+function UploadTab({ onUpload }) {
+  const fileRef      = useRef();
+  const [selected,   setSelected]   = useState(null);
+  const [uploading,  setUploading]  = useState(false);
+  const [progress,   setProgress]   = useState(0);
+  const [dragging,   setDragging]   = useState(false);
+  const [error,      setError]      = useState("");
+  const { show: toast } = useToast();
+
+  const validate = (f) => {
+    if (!f) return "No file selected.";
+    const ext = getExt(f.name);
+    if (f.size > MAX_SIZE_MB * 1024 * 1024) return `File too large — max ${MAX_SIZE_MB} MB.`;
+    if (!ALLOWED_EXTENSIONS.includes(ext)) return `".${ext}" files are not allowed.`;
+    return null;
+  };
+
+  const doUpload = async (f) => {
+    const err = validate(f);
+    if (err) { setError(err); return; }
+    setError("");
+    const formData = new FormData();
+    formData.append("file", f);
+    try {
+      setUploading(true); setProgress(0);
+      await API.post("/files/upload", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+        onUploadProgress: e => setProgress(Math.round((e.loaded * 100) / e.total)),
+      });
+      setSelected(null);
+      if (fileRef.current) fileRef.current.value = "";
+      onUpload();
+      toast("File uploaded!", "success");
+    } catch (e) {
+      setError(e.response?.data?.error || e.response?.data?.message || "Upload failed. Check server logs.");
+    } finally { setUploading(false); setProgress(0); }
+  };
+
+  return (
+    <div className="fade-up-delay-1">
+      <div
+        className={`upload-zone ${dragging ? "dragging" : ""}`}
+        onDragOver={e => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={e => {
+          e.preventDefault(); setDragging(false);
+          const f = e.dataTransfer.files[0];
+          if (f) { setSelected(f); doUpload(f); }
+        }}
+      >
+        <input
+          ref={fileRef}
+          type="file"
+          // Accept everything — server decides what's truly allowed
+          accept="*/*"
+          onChange={e => setSelected(e.target.files[0])}
+        />
+        <div className="upload-zone-icon">☁️</div>
+        <h3>{selected ? selected.name : "Drop your file here"}</h3>
+        <p>{selected ? formatBytes(selected.size) : `or click to browse — max ${MAX_SIZE_MB} MB`}</p>
+        <p style={{ fontSize: 12, color: "#64748b", marginTop: 8 }}>
+          Supports: images, PDFs, videos, audio, code (.py .java .js .ts .go…), docs, archives
+        </p>
+        {uploading && (
+          <div className="progress-wrap" style={{ marginTop: 16, maxWidth: 400, margin: "16px auto 0" }}>
+            <div className="progress-bar" style={{ width: `${progress}%` }} />
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div style={{
+          margin: "12px auto", maxWidth: 460, padding: "12px 16px",
+          background: "rgba(251,113,133,0.1)", border: "1px solid rgba(251,113,133,0.3)",
+          borderRadius: 10, color: "#fb7185", fontSize: 14, textAlign: "center",
+        }}>
+          ⚠️ {error}
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "center", marginTop: 16, gap: 12 }}>
+        <button
+          className="btn btn-primary"
+          onClick={() => doUpload(selected || fileRef.current?.files[0])}
+          disabled={uploading}
+        >
+          {uploading ? `Uploading ${progress}%…` : "⬆️ Upload File"}
+        </button>
+        {selected && !uploading && (
+          <button className="btn btn-ghost"
+            onClick={() => { setSelected(null); setError(""); if (fileRef.current) fileRef.current.value = ""; }}>
+            ✕ Clear
+          </button>
+        )}
+      </div>
+
+      {/* Allowed types reference */}
+      <div style={{
+        marginTop: 32, padding: "16px 20px",
+        background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)",
+        borderRadius: 12,
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase",
+          letterSpacing: 1, color: "#64748b", marginBottom: 10 }}>
+          Allowed file types
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {["Images","PDFs","Videos","Audio","Python .py","Java .java","JavaScript .js / .jsx",
+            "TypeScript .ts / .tsx","Go .go","Rust .rs","C/C++ .c .cpp","C# .cs",
+            "Ruby .rb","PHP .php","Swift .swift","Kotlin .kt","Shell .sh",
+            "HTML .html","CSS .css / .scss","JSON / YAML / TOML","SQL .sql",
+            "Markdown .md","Archives .zip .rar","Docs .docx .xlsx"].map(t => (
+            <span key={t} style={{
+              padding: "3px 10px", borderRadius: 999, fontSize: 12,
+              background: "rgba(217,119,6,0.12)", border: "1px solid rgba(217,119,6,0.25)",
+              color: "#fbbf24",
+            }}>{t}</span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Dashboard ────────────────────────────────────────────────
 function Dashboard() {
-  const [activeTab, setActiveTab] = useState("myfiles");
-  const [files, setFiles] = useState([]);
-  const [receivedFiles, setReceivedFiles] = useState([]);
-  const [users, setUsers] = useState([]);
-  const [activityLogs, setActivityLogs] = useState([]);
+  const [activeTab,       setActiveTab]       = useState("myfiles");
+  const [files,           setFiles]           = useState([]);
+  const [receivedFiles,   setReceivedFiles]   = useState([]);
+  const [users,           setUsers]           = useState([]);
+  const [activityLogs,    setActivityLogs]    = useState([]);
   const [activityLoading, setActivityLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [search, setSearch] = useState("");
-  const [dragging, setDragging] = useState(false);
-  const [shareTarget, setShareTarget] = useState(null);
-  const [previewTarget, setPreviewTarget] = useState(null);
-  const [selectedFile, setSelectedFile] = useState(null);
-  const fileRef = useRef();
+  const [search,          setSearch]          = useState("");
+  const [shareTarget,     setShareTarget]     = useState(null);
+  const [previewTarget,   setPreviewTarget]   = useState(null);
   const { toasts, show: toast } = useToast();
 
-  const getFiles = async () => {
-    try { const res = await API.get("/files"); setFiles(res.data); } catch { /* empty */ }
-  };
-  const getReceivedFiles = async () => {
-    try { const res = await API.get("/files/received"); setReceivedFiles(res.data); } catch { /* empty */ }
-  };
-  const getUsers = async () => {
-    try { const res = await API.get("/users"); setUsers(res.data); } catch { /* empty */ }
-  };
-  const getActivity = async () => {
+  const getFiles         = async () => { try { const r = await API.get("/files");          setFiles(r.data);         } catch {} };
+  const getReceivedFiles = async () => { try { const r = await API.get("/files/received"); setReceivedFiles(r.data); } catch {} };
+  const getUsers         = async () => { try { const r = await API.get("/users");          setUsers(r.data);         } catch {} };
+  const getActivity      = async () => {
     setActivityLoading(true);
-    try { const res = await API.get("/files/activity"); setActivityLogs(res.data); } catch { /* empty */ }
+    try { const r = await API.get("/files/activity"); setActivityLogs(r.data); } catch {}
     setActivityLoading(false);
   };
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     getFiles(); getReceivedFiles(); getUsers();
     const uid = localStorage.getItem("userId");
     if (uid) socket.emit("join-room", uid);
     socket.on("file-uploaded", getFiles);
     socket.on("file-shared", () => { getReceivedFiles(); toast("📨 A file was shared with you!", "info"); });
     return () => { socket.off("file-uploaded"); socket.off("file-shared"); };
-  }, [toast]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (activeTab === "activity") getActivity();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
-  const uploadFile = async (fileToUpload) => {
-    if (!fileToUpload) { toast("Please select a file", "error"); return; }
-    if (fileToUpload.size > 50 * 1024 * 1024) { toast("File too large. Max 50 MB.", "error"); return; }
-    const formData = new FormData();
-    formData.append("file", fileToUpload);
+  // ── Download — uses fetch + auth header, then triggers browser save ──
+  const downloadFile = async (id, originalname) => {
     try {
-      setUploading(true); setUploadProgress(0);
-      await API.post("/files/upload", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-        onUploadProgress: e => setUploadProgress(Math.round((e.loaded * 100) / e.total)),
+      const token = localStorage.getItem("token");
+      const res   = await fetch(`${BASE_URL}/api/files/download/${id}`, {
+        headers: { Authorization: `Bearer ${token}` },
       });
-      toast("File uploaded!", "success");
-      if (fileRef.current) fileRef.current.value = "";
-      setSelectedFile(null);
-      getFiles();
-    } catch (err) {
-      toast(err.response?.data?.error || "Upload failed", "error");
-    } finally { setUploading(false); setUploadProgress(0); }
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault(); setDragging(false);
-    const file = e.dataTransfer.files[0];
-    if (file) { setSelectedFile(file); uploadFile(file); }
+      if (!res.ok) throw new Error(`Server ${res.status}`);
+      const blob    = await res.blob();
+      const url     = URL.createObjectURL(blob);
+      const link    = document.createElement("a");
+      link.href     = url;
+      link.download = originalname;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast("Download started!", "success");
+      getFiles(); // refresh download count
+    } catch (e) {
+      toast(`Download failed: ${e.message}`, "error");
+    }
   };
 
   const shareFile = async (fileId, receiverEmail) => {
@@ -425,47 +697,47 @@ function Dashboard() {
     }
   };
 
+  // After toggling public link, refresh files then update shareTarget so modal shows new token
   const togglePublicLink = async (fileId, isCurrentlyPublic) => {
     try {
-      const res = await API.post(`/files/public-link/${fileId}`);
+      await API.post(`/files/public-link/${fileId}`);
       toast(isCurrentlyPublic ? "Public link disabled" : "Public link generated!", "success");
-      getFiles(); // refresh to get updated publicToken
-      return res.data;
+      await getFiles();
     } catch (err) {
-      toast(err.response?.data?.message || "Failed", "error");
+      toast(err.response?.data?.message || "Failed to toggle link", "error");
     }
   };
 
-  const downloadFile = async (id, originalname) => {
-    try {
-      const res = await API.get(`/files/download/${id}`, { responseType: "blob" });
-      const url = window.URL.createObjectURL(new Blob([res.data]));
-      const link = document.createElement("a");
-      link.href = url; link.setAttribute("download", originalname);
-      document.body.appendChild(link); link.click(); link.remove();
-      toast("Download started!", "success");
-      getFiles(); // refresh download count
-    } catch { toast("Download failed", "error"); }
-  };
-
   const deleteFile = async (id) => {
-    if (!window.confirm("Delete this file?")) return;
+    if (!window.confirm("Delete this file permanently?")) return;
     try {
-      await API.delete(`/files/${id}`); getFiles();
+      await API.delete(`/files/${id}`);
+      getFiles();
       toast("File deleted", "info");
     } catch { toast("Delete failed", "error"); }
   };
 
   const logout = () => { localStorage.clear(); window.location.href = "/login"; };
 
-  const filtered = (activeTab === "myfiles" ? files : receivedFiles)
-    .filter(f => f.originalname?.toLowerCase().includes(search.toLowerCase()));
+  const allFiles = activeTab === "myfiles" ? files : receivedFiles;
+  const filtered = allFiles.filter(f =>
+    f.originalname?.toLowerCase().includes(search.toLowerCase())
+  );
 
   const totalSize = files.reduce((acc, f) => acc + (f.size || 0), 0);
 
+  // When files refresh, keep shareTarget in sync so public token shows immediately
+  useEffect(() => {
+    if (shareTarget) {
+      const updated = files.find(f => f._id === shareTarget._id);
+      if (updated) setShareTarget(updated);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files]);
+
   const navItems = [
-    { id: "myfiles",  icon: "📁", label: "My Files",        count: files.length },
-    { id: "shared",   icon: "📨", label: "Shared With Me",  count: receivedFiles.length },
+    { id: "myfiles",  icon: "📁", label: "My Files",       count: files.length },
+    { id: "shared",   icon: "📨", label: "Shared With Me", count: receivedFiles.length },
     { id: "upload",   icon: "⬆️", label: "Upload" },
     { id: "activity", icon: "📋", label: "Activity Log" },
   ];
@@ -484,11 +756,19 @@ function Dashboard() {
 
           <div className="nav-label">Navigation</div>
           {navItems.map(nav => (
-            <button key={nav.id} className={`nav-item ${activeTab === nav.id ? "active" : ""}`} onClick={() => setActiveTab(nav.id)}>
+            <button
+              key={nav.id}
+              className={`nav-item ${activeTab === nav.id ? "active" : ""}`}
+              onClick={() => setActiveTab(nav.id)}
+            >
               <span className="nav-icon">{nav.icon}</span>
               {nav.label}
               {nav.count !== undefined && (
-                <span style={{ marginLeft: "auto", fontSize: 11, background: "rgba(255,255,255,0.08)", padding: "2px 8px", borderRadius: 999 }}>
+                <span style={{
+                  marginLeft: "auto", fontSize: 11,
+                  background: "rgba(255,255,255,0.08)",
+                  padding: "2px 8px", borderRadius: 999,
+                }}>
                   {nav.count}
                 </span>
               )}
@@ -500,7 +780,7 @@ function Dashboard() {
               <div className="user-avatar">{(storedUser.username || "U")[0].toUpperCase()}</div>
               <div className="user-info">
                 <p>{storedUser.username || "User"}</p>
-                <span style={{ fontSize: 11, color: "#64748b" }}>{storedUser.email || ""}</span>
+                <span>{storedUser.email || ""}</span>
               </div>
             </div>
             <button className="logout-btn" onClick={logout}>🚪 Sign Out</button>
@@ -519,7 +799,7 @@ function Dashboard() {
             <p>
               {activeTab === "myfiles"  && "Manage, preview, and share your files"}
               {activeTab === "shared"   && "Files other users have shared with you"}
-              {activeTab === "upload"   && "Upload a file to your secure vault — max 50 MB"}
+              {activeTab === "upload"   && `Upload any file to your secure vault — max ${MAX_SIZE_MB} MB`}
               {activeTab === "activity" && "Every action on your files, tracked in real time"}
             </p>
           </div>
@@ -528,9 +808,9 @@ function Dashboard() {
           {activeTab === "myfiles" && (
             <div className="stats-row">
               {[
-                { icon: "📁", label: "Total Files",    value: files.length,           cls: "purple" },
-                { icon: "📨", label: "Received",       value: receivedFiles.length,   cls: "cyan" },
-                { icon: "💾", label: "Storage Used",   value: formatBytes(totalSize), cls: "green" },
+                { icon: "📁", label: "Total Files",  value: files.length,           cls: "purple" },
+                { icon: "📨", label: "Received",      value: receivedFiles.length,  cls: "cyan"   },
+                { icon: "💾", label: "Storage Used",  value: formatBytes(totalSize), cls: "green"  },
               ].map(s => (
                 <div key={s.label} className="stat-card fade-up-delay-1">
                   <div className={`stat-icon ${s.cls}`}>{s.icon}</div>
@@ -540,44 +820,26 @@ function Dashboard() {
             </div>
           )}
 
-          {/* Upload Tab */}
+          {/* Upload */}
           {activeTab === "upload" && (
-            <div className="fade-up-delay-1">
-              <div
-                className={`upload-zone ${dragging ? "dragging" : ""}`}
-                onDragOver={e => { e.preventDefault(); setDragging(true); }}
-                onDragLeave={() => setDragging(false)}
-                onDrop={handleDrop}
-              >
-                <input ref={fileRef} type="file" onChange={e => setSelectedFile(e.target.files[0])} />
-                <div className="upload-zone-icon">☁️</div>
-                <h3>{selectedFile ? selectedFile.name : "Drop your file here"}</h3>
-                <p>{selectedFile ? formatBytes(selectedFile.size) : "or click to browse — Max 50 MB"}</p>
-                {uploading && (
-                  <div className="progress-wrap" style={{ marginTop: 16 }}>
-                    <div className="progress-bar" style={{ width: `${uploadProgress}%` }} />
-                  </div>
-                )}
-              </div>
-              <div style={{ display: "flex", justifyContent: "center", marginTop: 16 }}>
-                <button className="btn btn-primary" onClick={() => uploadFile(selectedFile || fileRef.current?.files[0])} disabled={uploading}>
-                  {uploading ? `Uploading ${uploadProgress}%…` : "⬆️ Upload File"}
-                </button>
-              </div>
-            </div>
+            <UploadTab onUpload={() => { getFiles(); setActiveTab("myfiles"); }} />
           )}
 
-          {/* Activity Tab */}
+          {/* Activity */}
           {activeTab === "activity" && (
             <ActivityLogTab logs={activityLogs} loading={activityLoading} />
           )}
 
-          {/* File Lists */}
+          {/* File lists */}
           {(activeTab === "myfiles" || activeTab === "shared") && (
             <>
               <div className="search-bar fade-up-delay-1">
                 <span className="search-icon">🔍</span>
-                <input placeholder="Search files…" value={search} onChange={e => setSearch(e.target.value)} />
+                <input
+                  placeholder="Search files…"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                />
               </div>
 
               <div className="section-heading">
@@ -589,7 +851,11 @@ function Dashboard() {
                 <div className="empty-state">
                   <div className="empty-icon">📭</div>
                   <h3>{search ? "No files match your search" : "No files yet"}</h3>
-                  <p>{!search && (activeTab === "myfiles" ? "Upload your first file to get started" : "Files shared with you will appear here")}</p>
+                  <p>
+                    {!search && (activeTab === "myfiles"
+                      ? "Upload your first file to get started"
+                      : "Files shared with you will appear here")}
+                  </p>
                 </div>
               ) : (
                 <div className="file-grid">
@@ -614,20 +880,19 @@ function Dashboard() {
       {/* Modals */}
       {shareTarget && (
         <ShareModal
-          file={files.find(f => f._id === shareTarget._id) || shareTarget}
+          file={shareTarget}
           users={users}
           onClose={() => setShareTarget(null)}
           onShare={shareFile}
-          onPublicLink={async (id, isPublic) => {
-            await togglePublicLink(id, isPublic);
-            await getFiles();
-            setShareTarget(files.find(f => f._id === id) || shareTarget);
-          }}
+          onPublicLink={togglePublicLink}
         />
       )}
 
       {previewTarget && (
-        <PreviewModal file={previewTarget} onClose={() => setPreviewTarget(null)} />
+        <PreviewModal
+          file={previewTarget}
+          onClose={() => setPreviewTarget(null)}
+        />
       )}
 
       <ToastContainer toasts={toasts} />
