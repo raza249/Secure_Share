@@ -1001,3 +1001,96 @@ body {
 .fade-up-delay-1 { animation: fade-up 0.5s 0.1s cubic-bezier(.16,1,.3,1) both; }
 .fade-up-delay-2 { animation: fade-up 0.5s 0.2s cubic-bezier(.16,1,.3,1) both; }
 .fade-up-delay-3 { animation: fade-up 0.5s 0.3s cubic-bezier(.16,1,.3,1) both; }
+/* ===== MOBILE BOTTOM NAV ===== */
+.mobile-bottom-nav {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .mobile-bottom-nav {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 200;
+    background: rgba(12, 15, 10, 0.97);
+    border-top: 1px solid var(--glass-border);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    padding: 8px 0 max(8px, env(safe-area-inset-bottom));
+  }
+
+  .mobile-bottom-nav a,
+  .mobile-bottom-nav button {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 6px 4px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+    background: none;
+    border: none;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+    text-decoration: none;
+    transition: color 0.2s;
+    letter-spacing: 0.3px;
+  }
+
+  .mobile-bottom-nav a.active,
+  .mobile-bottom-nav button.active {
+    color: var(--accent);
+  }
+
+  .mobile-bottom-nav a:hover,
+  .mobile-bottom-nav button:hover {
+    color: var(--text);
+  }
+
+  .mobile-bottom-nav .mob-icon {
+    font-size: 20px;
+    line-height: 1;
+  }
+
+  /* Upload tab special highlight */
+  .mobile-bottom-nav .mob-upload {
+    color: var(--accent2);
+  }
+
+  .mobile-bottom-nav .mob-upload.active,
+  .mobile-bottom-nav .mob-upload:hover {
+    color: var(--accent);
+  }
+
+  /* Push main content above the bottom nav */
+  .main-content {
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+
+  /* Stats: 1 column stacks too tall — use 2-col on mobile too */
+  .stats-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+}
+
+@media (max-width: 640px) {
+  .stats-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .main-content {
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 480px) {
+  .stats-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}
