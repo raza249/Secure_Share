@@ -671,7 +671,7 @@ function Dashboard() {
   const downloadFile = async (id, originalname) => {
     try {
       const token = localStorage.getItem("token");
-      const res   = await fetch(`${BASE_URL}/api/files/download/${id}`, {
+       const res = await fetch(`${API_BASE}/files/download/${id}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(`Server ${res.status}`);
