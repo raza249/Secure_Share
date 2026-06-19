@@ -1,50 +1,92 @@
+// src/routes/fileRoutes.mjs
 import { Router } from "express";
 import multer from "multer";
-import path from "path";
-import { fileURLToPath } from "url";
 import { v4 as uuidv4 } from "uuid";
+import { Readable } from "stream";
+import cloudinary from "../utils/cloudinary.mjs";
 import { File } from "../mongoose/schemas/file.mjs";
 import { ActivityLog } from "../mongoose/schemas/activityLog.mjs";
 import { authMiddleware } from "../middlewares/authMiddleware.mjs";
-import { validateFileUpload } from "../middlewares/fileValidationMiddleware.mjs";
 import { uploadLimiter } from "../middlewares/rateLimitMiddleware.mjs";
 import { logActivity } from "../utils/logActivity.mjs";
 import { io } from "../../server.mjs";
 import { User } from "../mongoose/schemas/user.mjs";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// ── Multer — store in memory (buffer), not disk ──────────────
+const storage = multer.memoryStorage();
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, path.join(__dirname, "../../uploads")),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `${Date.now()}-${uuidv4()}${ext}`);
+const ALLOWED_TYPES = [
+  "image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml",
+  "application/pdf",
+  "text/plain", "text/csv",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/zip",
+  "video/mp4", "video/webm",
+  "audio/mpeg", "audio/ogg", "audio/wav",
+];
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
+  fileFilter: (req, file, cb) => {
+    if (ALLOWED_TYPES.includes(file.mimetype)) cb(null, true);
+    else cb(new Error(`File type '${file.mimetype}' is not allowed.`), false);
   },
 });
 
-const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
 const router = Router();
 
-// ── Upload ───────────────────────────────────────────────────
+// ── Helper: upload buffer to Cloudinary ──────────────────────
+function uploadToCloudinary(buffer, options = {}) {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(options, (error, result) => {
+      if (error) reject(error);
+      else resolve(result);
+    });
+    // Convert buffer to readable stream and pipe
+    const readable = new Readable();
+    readable.push(buffer);
+    readable.push(null);
+    readable.pipe(uploadStream);
+  });
+}
+
+// ── Upload ────────────────────────────────────────────────────
 router.post(
   "/upload",
-  authMiddleware, uploadLimiter, upload.single("file"), validateFileUpload,
+  authMiddleware,
+  uploadLimiter,
+  upload.single("file"),
   async (req, res) => {
     try {
+      if (!req.file) return res.status(400).json({ error: "No file provided." });
+
+      // Upload buffer to Cloudinary
+      const result = await uploadToCloudinary(req.file.buffer, {
+        folder: "secureshare",
+        public_id: `${Date.now()}-${uuidv4()}`,
+        resource_type: "auto", // handles images, videos, raw files
+      });
+
       const shareId = uuidv4();
       const newFile = new File({
-        filename: req.file.filename,
-        originalname: req.file.originalname,
-        mimetype: req.file.mimetype,
-        size: req.file.size,
-        path: req.file.path,
+        filename:      result.public_id,
+        originalname:  req.file.originalname,
+        mimetype:      req.file.mimetype,
+        size:          req.file.size,
+        cloudinaryId:  result.public_id,
+        cloudinaryUrl: result.secure_url,
         shareId,
         owner: req.user.id,
       });
+
       await newFile.save();
       io.to(req.user.id).emit("file-uploaded", newFile);
       await logActivity({ userId: req.user.id, action: "uploaded", fileId: newFile._id, fileName: newFile.originalname });
+
       return res.status(201).json(newFile);
     } catch (err) {
       return res.status(500).json({ error: err.message });
@@ -83,16 +125,13 @@ router.post("/share", authMiddleware, async (req, res) => {
   }
 });
 
-// ── 🆕 Generate / toggle public share link ────────────────────
+// ── Public link toggle ────────────────────────────────────────
 router.post("/public-link/:id", authMiddleware, async (req, res) => {
   try {
     const file = await File.findOne({ _id: req.params.id, owner: req.user.id });
     if (!file) return res.status(404).json({ message: "File not found." });
 
-    const { expiresIn } = req.body; // optional: hours until expiry, e.g. 24
-
     if (file.isPublic) {
-      // Toggle OFF — disable public link
       file.isPublic = false;
       file.publicToken = undefined;
       file.publicLinkExpiresAt = null;
@@ -100,7 +139,7 @@ router.post("/public-link/:id", authMiddleware, async (req, res) => {
       return res.json({ message: "Public link disabled.", isPublic: false });
     }
 
-    // Toggle ON — generate public link
+    const { expiresIn } = req.body;
     file.isPublic = true;
     file.publicToken = uuidv4();
     file.publicLinkExpiresAt = expiresIn
@@ -114,7 +153,7 @@ router.post("/public-link/:id", authMiddleware, async (req, res) => {
       message: "Public link generated.",
       isPublic: true,
       publicToken: file.publicToken,
-      publicUrl: `${process.env.CLIENT_URL || "http://localhost:5173"}/public/${file.publicToken}`,
+      publicUrl: `${process.env.CLIENT_URL}/public/${file.publicToken}`,
       expiresAt: file.publicLinkExpiresAt,
     });
   } catch (err) {
@@ -122,15 +161,14 @@ router.post("/public-link/:id", authMiddleware, async (req, res) => {
   }
 });
 
-// ── 🆕 Public download (no auth required) ────────────────────
+// ── Public download (no auth) ─────────────────────────────────
 router.get("/public/:token", async (req, res) => {
   try {
     const file = await File.findOne({ publicToken: req.params.token, isPublic: true });
     if (!file) return res.status(404).json({ message: "Link not found or disabled." });
 
     if (file.publicLinkExpiresAt && new Date() > file.publicLinkExpiresAt) {
-      file.isPublic = false;
-      file.publicToken = undefined;
+      file.isPublic = false; file.publicToken = undefined;
       await file.save();
       return res.status(410).json({ message: "This link has expired." });
     }
@@ -138,38 +176,38 @@ router.get("/public/:token", async (req, res) => {
     file.downloadCount = (file.downloadCount || 0) + 1;
     await file.save();
 
-    return res.download(file.path, file.originalname);
+    // Redirect to Cloudinary URL (Cloudinary serves it directly)
+    return res.redirect(file.cloudinaryUrl);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// ── 🆕 Public file info (for preview page) ───────────────────
+// ── Public file info ──────────────────────────────────────────
 router.get("/public-info/:token", async (req, res) => {
   try {
     const file = await File.findOne({ publicToken: req.params.token, isPublic: true })
       .populate("owner", "username");
     if (!file) return res.status(404).json({ message: "Link not found or disabled." });
 
-    if (file.publicLinkExpiresAt && new Date() > file.publicLinkExpiresAt) {
+    if (file.publicLinkExpiresAt && new Date() > file.publicLinkExpiresAt)
       return res.status(410).json({ message: "This link has expired." });
-    }
 
     res.json({
-      originalname: file.originalname,
-      mimetype: file.mimetype,
-      size: file.size,
-      owner: file.owner?.username,
+      originalname:  file.originalname,
+      mimetype:      file.mimetype,
+      size:          file.size,
+      owner:         file.owner?.username,
       downloadCount: file.downloadCount,
-      createdAt: file.createdAt,
-      expiresAt: file.publicLinkExpiresAt,
+      createdAt:     file.createdAt,
+      expiresAt:     file.publicLinkExpiresAt,
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// ── 🆕 Preview (auth required, increments previewCount) ──────
+// ── Preview (auth required) ───────────────────────────────────
 router.get("/preview/:id", authMiddleware, async (req, res) => {
   try {
     const file = await File.findById(req.params.id);
@@ -182,26 +220,10 @@ router.get("/preview/:id", authMiddleware, async (req, res) => {
 
     file.previewCount = (file.previewCount || 0) + 1;
     await file.save();
-
     await logActivity({ userId: req.user.id, action: "previewed", fileId: file._id, fileName: file.originalname });
 
-    // Stream the file inline (not as download attachment)
-    res.setHeader("Content-Type", file.mimetype);
-    res.setHeader("Content-Disposition", `inline; filename="${file.originalname}"`);
-    const fs = await import("fs");
-    fs.createReadStream(file.path).pipe(res);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ── Received files ────────────────────────────────────────────
-router.get("/received", authMiddleware, async (req, res) => {
-  try {
-    const files = await File.find({ sharedWith: req.user.id })
-      .populate("owner", "username email")
-      .sort({ createdAt: -1 });
-    res.json(files);
+    // Redirect to Cloudinary secure URL for preview
+    return res.redirect(file.cloudinaryUrl);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -220,16 +242,28 @@ router.get("/download/:id", authMiddleware, async (req, res) => {
 
     file.downloadCount = (file.downloadCount || 0) + 1;
     await file.save();
-
     await logActivity({ userId: req.user.id, action: "downloaded", fileId: file._id, fileName: file.originalname });
 
-    return res.download(file.path, file.originalname);
+    // Redirect to Cloudinary URL — browser downloads it
+    return res.redirect(file.cloudinaryUrl);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// ── 🆕 Activity log for current user ─────────────────────────
+// ── Received files ────────────────────────────────────────────
+router.get("/received", authMiddleware, async (req, res) => {
+  try {
+    const files = await File.find({ sharedWith: req.user.id })
+      .populate("owner", "username email")
+      .sort({ createdAt: -1 });
+    res.json(files);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ── Activity log ──────────────────────────────────────────────
 router.get("/activity", authMiddleware, async (req, res) => {
   try {
     const logs = await ActivityLog.find({ user: req.user.id })
@@ -258,13 +292,13 @@ router.delete("/:id", authMiddleware, async (req, res) => {
     const file = await File.findOneAndDelete({ _id: req.params.id, owner: req.user.id });
     if (!file) return res.status(404).json({ message: "File not found." });
 
-    await logActivity({ userId: req.user.id, action: "deleted", fileId: file._id, fileName: file.originalname });
+    // Delete from Cloudinary
+    await cloudinary.uploader.destroy(file.cloudinaryId, {
+      resource_type: file.mimetype.startsWith("video/") ? "video" : 
+                     file.mimetype.startsWith("image/") ? "image" : "raw",
+    });
 
-    // Clean up from disk
-    try {
-      const fs = await import("fs");
-      fs.unlinkSync(file.path);
-    } catch (_) { /* file may already be gone */ }
+    await logActivity({ userId: req.user.id, action: "deleted", fileId: file._id, fileName: file.originalname });
 
     return res.status(200).json({ message: "File deleted." });
   } catch (err) {
