@@ -8,21 +8,18 @@ const fileSchema = new mongoose.Schema(
     mimetype:     String,
     size:         Number,
 
-    // 🆕 Cloudinary fields (replaces local `path`)
-    cloudinaryId:  { type: String, required: true }, // public_id for deletion
-    cloudinaryUrl: { type: String, required: true }, // secure_url for serving
+    cloudinaryId:  { type: String, required: true },
+    cloudinaryUrl: { type: String, required: true },
+    resourceType:  { type: String, default: "raw" },
 
-    // User-to-user sharing
     shareId:    { type: String, unique: true },
     owner:      { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     sharedWith: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
 
-    // Public share link
     isPublic:            { type: Boolean, default: false },
     publicToken:         { type: String, unique: true, sparse: true },
     publicLinkExpiresAt: { type: Date, default: null },
 
-    // Stats
     downloadCount: { type: Number, default: 0 },
     previewCount:  { type: Number, default: 0 },
   },
