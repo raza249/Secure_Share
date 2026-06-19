@@ -145,7 +145,7 @@ function ToastContainer({ toasts }) {
 // ─── Preview Modal ────────────────────────────────────────────
 function PreviewModal({ file, onClose }) {
   const token      = localStorage.getItem("token");
-  const previewUrl = `${BASE_URL}/api/files/preview/${file._id}`;
+  const previewUrl = `${API_BASE}/files/preview/${file._id}`;
   const [blobUrl,  setBlobUrl]  = useState(null);
   const [content,  setContent]  = useState("");   // for text files
   const [loading,  setLoading]  = useState(true);
