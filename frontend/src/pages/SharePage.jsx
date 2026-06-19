@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import axios from "axios";
+
+const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:5000/api")
+  .replace(/\/api$/, "") + "/api";
 
 function formatBytes(bytes) {
   if (!bytes) return "0 B";
@@ -10,130 +12,191 @@ function formatBytes(bytes) {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
 
-function formatDate(str) {
-  return new Date(str).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-}
-
-function getFileIcon(mimetype = "") {
-  if (mimetype.startsWith("image/")) return "🖼️";
-  if (mimetype === "application/pdf") return "📄";
-  if (mimetype.startsWith("video/")) return "🎬";
-  if (mimetype.startsWith("audio/")) return "🎵";
-  if (mimetype.includes("word")) return "📝";
-  if (mimetype.includes("zip")) return "🗜️";
-  return "📁";
-}
-
 export default function SharePage() {
   const { token } = useParams();
-  const [info, setInfo] = useState(null);
-  const [status, setStatus] = useState("loading"); // loading | found | expired | notfound
+  const [info,        setInfo]        = useState(null);
+  const [status,      setStatus]      = useState("loading");
   const [downloading, setDownloading] = useState(false);
+  const [downloaded,  setDownloaded]  = useState(false);
 
   useEffect(() => {
-    axios.get(`http://localhost:5000/api/files/public-info/${token}`)
-      .then(res => { setInfo(res.data); setStatus("found"); })
-      .catch(err => {
-        if (err.response?.status === 410) setStatus("expired");
-        else setStatus("notfound");
-      });
+    fetch(`${API_BASE}/files/public-info/${token}`)
+      .then(async res => {
+        if (res.status === 410) { setStatus("expired"); return; }
+        if (!res.ok)            { setStatus("error");   return; }
+        const data = await res.json();
+        setInfo(data);
+        setStatus("ready");
+      })
+      .catch(() => setStatus("error"));
   }, [token]);
 
-  const downloadFile = async () => {
+  const handleDownload = async () => {
     setDownloading(true);
     try {
-      const res = await axios.get(`http://localhost:5000/api/files/public/${token}`, { responseType: "blob" });
-      const url = window.URL.createObjectURL(new Blob([res.data]));
-      const link = document.createElement("a");
-      link.href = url;
-      link.setAttribute("download", info.originalname);
+      const res = await fetch(`${API_BASE}/files/public/${token}`);
+      if (!res.ok) throw new Error("Download failed");
+      const blob    = await res.blob();
+      const url     = URL.createObjectURL(blob);
+      const link    = document.createElement("a");
+      link.href     = url;
+      link.download = info?.originalname || "download";
       document.body.appendChild(link);
       link.click();
       link.remove();
-    } catch { alert("Download failed."); }
-    setDownloading(false);
+      URL.revokeObjectURL(url);
+      setDownloaded(true);
+    } catch {
+      setStatus("error");
+    } finally {
+      setDownloading(false);
+    }
   };
 
   return (
-    <div className="page-root">
-      <div className="aurora-bg"><div className="aurora-orb" /></div>
-      <div className="auth-wrap">
-        <div className="auth-card" style={{ maxWidth: 480 }}>
+    <div style={{
+      minHeight: "100vh",
+      background: "#0c0f0a",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontFamily: "Inter, sans-serif",
+      padding: 24,
+    }}>
+      {/* Aurora blobs */}
+      <div style={{ position: "fixed", inset: 0, zIndex: 0, overflow: "hidden", pointerEvents: "none" }}>
+        <div style={{
+          position: "absolute", width: 600, height: 600, top: -150, left: -150,
+          background: "radial-gradient(circle, rgba(217,119,6,0.25) 0%, transparent 70%)",
+        }} />
+        <div style={{
+          position: "absolute", width: 500, height: 500, bottom: -100, right: -100,
+          background: "radial-gradient(circle, rgba(13,148,136,0.2) 0%, transparent 70%)",
+        }} />
+      </div>
 
-          {status === "loading" && (
-            <div style={{ textAlign: "center", padding: "20px 0", color: "#94a3b8" }}>
-              <div style={{ fontSize: 40, marginBottom: 12 }}>⏳</div>
-              <p>Loading file info…</p>
+      <div style={{
+        position: "relative", zIndex: 1,
+        width: "100%", maxWidth: 440,
+        background: "rgba(255,255,255,0.04)",
+        border: "1px solid rgba(255,255,255,0.1)",
+        borderRadius: 24,
+        padding: "40px 36px",
+        backdropFilter: "blur(20px)",
+        textAlign: "center",
+      }}>
+        {/* Logo */}
+        <div style={{
+          width: 52, height: 52, borderRadius: 14, margin: "0 auto 20px",
+          background: "linear-gradient(135deg, #d97706, #0d9488)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 24,
+        }}>🔒</div>
+
+        <h2 style={{
+          fontFamily: "Space Grotesk, sans-serif",
+          fontSize: 22, fontWeight: 700, color: "#f1f5f9", margin: "0 0 6px",
+        }}>SecureShare</h2>
+
+        <p style={{ color: "#64748b", fontSize: 13, margin: "0 0 32px" }}>
+          Secure file sharing
+        </p>
+
+        {/* Loading */}
+        {status === "loading" && (
+          <div style={{ color: "#94a3b8", fontSize: 15 }}>
+            <div style={{ fontSize: 36, marginBottom: 12 }}>⏳</div>
+            Fetching file info…
+          </div>
+        )}
+
+        {/* Expired */}
+        {status === "expired" && (
+          <div>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>⏰</div>
+            <h3 style={{ color: "#fb7185", fontSize: 18, margin: "0 0 8px" }}>Link Expired</h3>
+            <p style={{ color: "#64748b", fontSize: 14 }}>
+              This public link has expired and is no longer valid.
+            </p>
+          </div>
+        )}
+
+        {/* Error */}
+        {status === "error" && (
+          <div>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>❌</div>
+            <h3 style={{ color: "#fb7185", fontSize: 18, margin: "0 0 8px" }}>Link Not Found</h3>
+            <p style={{ color: "#64748b", fontSize: 14 }}>
+              This link is invalid or has been disabled by the owner.
+            </p>
+          </div>
+        )}
+
+        {/* Ready */}
+        {status === "ready" && info && (
+          <div>
+            <div style={{
+              width: 64, height: 64, borderRadius: 16, margin: "0 auto 20px",
+              background: "rgba(217,119,6,0.15)",
+              border: "1px solid rgba(217,119,6,0.3)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 28,
+            }}>📄</div>
+
+            <h3 style={{
+              color: "#f1f5f9", fontSize: 16, fontWeight: 600,
+              margin: "0 0 8px", wordBreak: "break-all",
+            }}>{info.originalname}</h3>
+
+            <div style={{
+              display: "flex", gap: 8, justifyContent: "center",
+              flexWrap: "wrap", margin: "0 0 28px",
+            }}>
+              {[
+                formatBytes(info.size),
+                `Shared by ${info.owner || "Unknown"}`,
+                info.downloadCount > 0 && `${info.downloadCount} downloads`,
+                info.expiresAt && `Expires ${new Date(info.expiresAt).toLocaleDateString()}`,
+              ].filter(Boolean).map((label, i) => (
+                <span key={i} style={{
+                  padding: "4px 10px", borderRadius: 999, fontSize: 12,
+                  background: "rgba(255,255,255,0.06)",
+                  border: "1px solid rgba(255,255,255,0.1)",
+                  color: "#94a3b8",
+                }}>{label}</span>
+              ))}
             </div>
-          )}
 
-          {status === "notfound" && (
-            <div style={{ textAlign: "center", padding: "20px 0" }}>
-              <div style={{ fontSize: 48, marginBottom: 12 }}>🔗</div>
-              <h2 style={{ color: "#f1f5f9", marginBottom: 8 }}>Link Not Found</h2>
-              <p style={{ color: "#94a3b8" }}>This share link doesn't exist or has been disabled by the owner.</p>
-            </div>
-          )}
-
-          {status === "expired" && (
-            <div style={{ textAlign: "center", padding: "20px 0" }}>
-              <div style={{ fontSize: 48, marginBottom: 12 }}>⌛</div>
-              <h2 style={{ color: "#f1f5f9", marginBottom: 8 }}>Link Expired</h2>
-              <p style={{ color: "#94a3b8" }}>This share link has expired. Ask the owner to generate a new one.</p>
-            </div>
-          )}
-
-          {status === "found" && info && (
-            <>
-              <div className="auth-logo">
-                <div className="logo-icon" style={{ fontSize: 28 }}>{getFileIcon(info.mimetype)}</div>
-                <h1 style={{ fontSize: 20 }}>Shared File</h1>
-                <p>Someone shared a file with you via SecureShare</p>
-              </div>
-
-              {/* File info card */}
-              <div style={{
-                background: "rgba(255,255,255,0.04)",
-                border: "1px solid rgba(255,255,255,0.1)",
-                borderRadius: 14,
-                padding: "18px 20px",
-                marginBottom: 20,
-              }}>
-                <div style={{ fontSize: 16, fontWeight: 700, color: "#f1f5f9", marginBottom: 12, wordBreak: "break-all" }}>
-                  {info.originalname}
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px" }}>
-                  {[
-                    { label: "Size",      value: formatBytes(info.size) },
-                    { label: "Shared by", value: info.owner || "Unknown" },
-                    { label: "Uploaded",  value: formatDate(info.createdAt) },
-                    { label: "Downloads", value: info.downloadCount || 0 },
-                  ].map(row => (
-                    <div key={row.label}>
-                      <div style={{ fontSize: 11, color: "#475569", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 2 }}>
-                        {row.label}
-                      </div>
-                      <div style={{ fontSize: 14, color: "#94a3b8", fontWeight: 500 }}>{row.value}</div>
-                    </div>
-                  ))}
-                </div>
-                {info.expiresAt && (
-                  <div style={{ marginTop: 12, padding: "8px 12px", background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 8, fontSize: 12, color: "#fbbf24" }}>
-                    ⚠️ Expires {formatDate(info.expiresAt)}
-                  </div>
-                )}
-              </div>
-
-              <button className="auth-btn" onClick={downloadFile} disabled={downloading}>
-                {downloading ? "Downloading…" : `⬇️ Download File`}
+            {!downloaded ? (
+              <button
+                onClick={handleDownload}
+                disabled={downloading}
+                style={{
+                  width: "100%", padding: "14px",
+                  background: downloading
+                    ? "rgba(255,255,255,0.06)"
+                    : "linear-gradient(135deg, #d97706, #0d9488)",
+                  border: "none", borderRadius: 10,
+                  color: "#fff", fontSize: 15, fontWeight: 600,
+                  cursor: downloading ? "not-allowed" : "pointer",
+                  transition: "all 0.2s",
+                }}
+              >
+                {downloading ? "⏳ Downloading…" : "⬇️ Download File"}
               </button>
-
-              <p className="auth-link" style={{ marginTop: 16 }}>
-                Want to share your own files? <a href="/signup">Create an account</a>
-              </p>
-            </>
-          )}
-        </div>
+            ) : (
+              <div style={{
+                padding: "14px",
+                background: "rgba(52,211,153,0.1)",
+                border: "1px solid rgba(52,211,153,0.3)",
+                borderRadius: 10, color: "#34d399",
+                fontSize: 15, fontWeight: 600,
+              }}>
+                ✅ Download started!
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
