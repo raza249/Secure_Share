@@ -2,8 +2,12 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { io } from "socket.io-client";
 import API from "../api";
 
-// ─── Base URL (no hardcoded localhost) ────────────────────────
-const BASE_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
+// ── Line ~5 (after imports) ───────────────────────────────────
+
+
+// REPLACE with these two lines:
+const BASE_URL = (import.meta.env.VITE_API_URL || import.meta.env.VITE_SOCKET_URL || "http://localhost:5000").replace(/\/api$/, "");
+const API_BASE = `${BASE_URL}/api`;
 
 const socket = io(BASE_URL, {
   auth: { token: localStorage.getItem("token") },
