@@ -236,7 +236,7 @@ router.post("/public-link/:id", authMiddleware, async (req, res) => {
       return res.json({ message: "Public link disabled.", isPublic: false });
     }
 
-    const { expiresIn } = req.body;
+    const expiresIn = req.body?.expiresIn;
     file.isPublic = true;
     file.publicToken = uuidv4();
     file.publicLinkExpiresAt = expiresIn
